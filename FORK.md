@@ -76,8 +76,15 @@ declaring itself ready:
   already, so the logo check passed while the header read back as
   `07 04 06` instead of `03 04 02` (every byte off by exactly `0x04`).
   The checksum catches that class of failure.
-- **Writes**: reading the same Transfer Pak address in bank 0 and bank 1
-  (GB `0x0000` vs `0x4000`) must return different data.
+- **Writes, at the pak**: reading the same Transfer Pak address in bank 0
+  and bank 1 (GB `0x0000` vs `0x4000`) must return different data.
+- **Writes, at the cartridge**: the pak's bank register moving does not
+  mean the cartridge's own mapper is listening. Switching the *cartridge*
+  between ROM banks 1 and 2 must change what GB `0x4000` reads. Skipping
+  this dumped Donkey Kong Country 2001 as 256 identical copies of ROM
+  bank 1 — the cartridge sitting on its power-up bank, so the data looked
+  real and varied, just with no header anywhere in it. (The ESP32 build
+  checks this; the AVR build so far only checks the pak-level write.)
 
 If either check fails, the LED goes back to blinking and asks for another
 reinsertion. Pak slot contact turned out to be marginal on our hardware —
@@ -111,6 +118,8 @@ header, which covers every byte of the file):
 | Super Mario Land 2 | MBC1 | 512 KiB | `0xA613` ✓ |
 | Super Mario Land | MBC1 | 64 KiB | `0x5ECF` ✓ |
 | Wario Land (Super Mario Land 3) | MBC1 | 512 KiB | `0xF4A5` ✓ |
+| Tetris | ROM only | 32 KiB | `0x16BF` ✓ |
+| Donkey Kong Country 2001 | MBC5 | 4 MiB | `0x71E7` ✓ |
 
 
 The ESP32-C6 port
@@ -163,9 +172,14 @@ data line, with the same ~1k pull-up to 3.3V. On the C6 that pull-up is
 not about voltage levels — it is about edge rate, and the internal
 pull-up alone is far too weak for 1 µs pulses.
 
+Serial runs at 921600 rather than 115200. A 4 MiB cartridge is about six
+minutes of transfer at 115200, and the longer a dump runs the more chance
+the marginal pak contact has to drop out part-way through.
+
 Status: **verified end to end.** The ESP32-C6 build dumped Wario Land
-(512 KiB, MBC1) and the result is byte-identical to the Uno build's dump
-of the same cartridge (md5 `d9d95777…`), global checksum `0xF4A5`
-matching the header. The DevKit's RGB LED gives the same cue the Uno's
+(512 KiB, MBC1) byte-identically to the Uno build's dump of the same
+cartridge (md5 `d9d95777…`), plus Tetris (32 KiB, ROM only) and Donkey
+Kong Country 2001 (4 MiB, MBC5), all with global checksums matching
+their headers. The DevKit's RGB LED gives the same cue the Uno's
 plain LED does: blinking amber = reinsert the pak, green = good
 insertion, red = that one failed.

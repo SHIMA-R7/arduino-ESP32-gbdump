@@ -81,7 +81,11 @@ static bool wait_for_pak_insertion(uint32_t timeout_ms)
 
 void setup()
 {
-    Serial.begin(115200);
+    // 921600 rather than 115200: a 4 MiB cartridge is ~6 minutes of
+    // transfer at 115200, and the longer the dump runs the more chance
+    // the (marginal) pak contact has to drop out mid-way. At 921600 the
+    // same cartridge takes well under a minute.
+    Serial.begin(921600);
     delay(2000); // give the USB CDC terminal time to attach
     Serial.println("arduinogbdump / ESP32-C6 port");
 

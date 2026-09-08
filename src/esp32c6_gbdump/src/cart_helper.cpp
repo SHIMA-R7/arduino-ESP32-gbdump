@@ -89,7 +89,30 @@ bool cart_helper::verify_access()
         return false;
     }
 
-    // 2. Writes: the same TPak address in bank 0 vs bank 1 is GB 0x0000
+    // 2. Reads, harder: the header checksum at GB 0x014D has to match
+    //    the header bytes. The logo alone lets stuck data bits through --
+    //    CE, ED, 66 and 66 all have bit 2 set, so a bit-2-stuck-high read
+    //    sails past the logo check and still hands back a corrupt header
+    //    (seen on the Uno: 07 04 06 where the cartridge really says
+    //    03 04 02). Everything downstream then dumps nonsense.
+    uint8_t hdr[25]; // GB 0x0134-0x014C
+    uint8_t blk20[33] = {0};
+    tpak_.read(0xC120, blk20); // GB 0x0120-0x013F
+    memcpy(hdr, &blk20[20], 12);
+    uint8_t blk40[33] = {0};
+    tpak_.read(0xC140, blk40); // GB 0x0140-0x015F
+    memcpy(hdr + 12, blk40, 13);
+    uint8_t sum = 0;
+    for (int i = 0; i < 25; ++i) {
+        sum = sum - hdr[i] - 1;
+    }
+    if (sum != blk40[13]) { // GB 0x014D
+        Serial.printf("verify: header checksum mismatch (computed 0x%02X, stored 0x%02X)\n",
+                      sum, blk40[13]);
+        return false;
+    }
+
+    // 3. Writes: the same TPak address in bank 0 vs bank 1 is GB 0x0000
     //    vs GB 0x4000, which always differ on a real cartridge. If they
     //    match, the bank-select write never took.
     uint8_t b0[33] = {0};
@@ -104,14 +127,57 @@ bool cart_helper::verify_access()
         return false;
     }
 
-    // Good insertion -- (re)read the header fields.
-    uint8_t header[33] = {0};
-    tpak_.read(0xC140, header);
-    raw_cart_type_ = header[7];
-    raw_rom_size_ = header[8];
-    raw_ram_size_ = header[9];
+    // Header is trustworthy now, so interpret it.
+    raw_cart_type_ = blk40[7];
+    raw_rom_size_ = blk40[8];
+    raw_ram_size_ = blk40[9];
     interpret_raw_data();
+
+    // 4. Writes that go *through* the pak to the cartridge's own mapper.
+    //    Step 3 only proves the Transfer Pak's bank register moves; the
+    //    MBC lives behind it and can stay stuck while that still works.
+    //    When it does, the cartridge sits on its power-up bank and every
+    //    "switched" read returns that same window -- a whole 4 MiB dumped
+    //    as 256 copies of bank 1, real-looking data with no header in it.
+    //    So actually switch the cartridge between two banks and require
+    //    the window to change.
+    if (cart_mbc_type_ != mbc_type::rom_only && rom_size_ > 2) {
+        uint8_t win1[33] = {0};
+        uint8_t win2[33] = {0};
+
+        set_rom_bank_for_test(1);
+        tpak_.set_bank(0x01);
+        tpak_.read(0xC000, win1); // GB 0x4000 with bank 1 selected
+
+        set_rom_bank_for_test(2);
+        tpak_.set_bank(0x01);
+        tpak_.read(0xC000, win2); // GB 0x4000 with bank 2 selected
+
+        tpak_.set_bank(0x00);
+        if (memcmp(win1, win2, 32) == 0) {
+            Serial.println("verify: cartridge MBC bank switch did not take "
+                           "(reads fine, but the mapper is stuck)");
+            return false;
+        }
+    }
+
     return true;
+}
+
+// Selects a ROM bank the way this cartridge's mapper expects, for the
+// bank-switch check above. MBC1/MBC3 take the bank number at GB 0x2000;
+// MBC5 splits it into a low byte there plus a high bit at GB 0x3000.
+void cart_helper::set_rom_bank_for_test(uint16_t bank)
+{
+    switch (cart_mbc_type_) {
+        case mbc_type::mbc5:
+        case mbc_type::mbc5_ram:
+            mbc5_set_rom_bank((uint8_t)(bank & 0xFF), (uint8_t)(bank >> 8));
+            break;
+        default:
+            write_byte_with_gb_addr(0x2000, (uint8_t)bank);
+            break;
+    }
 }
 
 void cart_helper::print_debug_probe()

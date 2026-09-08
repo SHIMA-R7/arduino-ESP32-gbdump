@@ -83,6 +83,7 @@ private:
     tpak tpak_;
 
     void interpret_raw_data();
+    void set_rom_bank_for_test(uint16_t bank);
 
     uint8_t calc_tpak_bank(uint16_t gb_addr) const { return (uint8_t)(gb_addr >> 14); }
     uint16_t calc_tpak_addr(uint16_t gb_addr) const { return (uint16_t)(gb_addr | 0xc000); }
