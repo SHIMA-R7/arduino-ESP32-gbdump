@@ -10,8 +10,8 @@ This fork adds three things to fl4shk's original arduinogbdump:
    instead of cycle-counted AVR assembly.
 
 Everything below was worked out on real hardware: an Arduino Uno, an N64
-controller, two different Transfer Paks, and three cartridges (Super Mario
-Land, Super Mario Land 2, Pokémon Gold).
+controller, two different Transfer Paks, and four cartridges (Super Mario
+Land, Super Mario Land 2, Wario Land, Pokémon Gold).
 
 
 The Transfer Pak unlock step
@@ -66,7 +66,12 @@ So after each insertion the sketch verifies both directions before
 declaring itself ready:
 
 - **Reads**: the Nintendo logo at GB `0x0104` must read back as its fixed
-  `CE ED 66 66 …` pattern.
+  `CE ED 66 66 …` pattern, **and** the header checksum at GB `0x014D` must
+  match. The logo alone is not enough — a marginal insertion here left
+  data bit 2 stuck high, and `CE`, `ED`, `66`, `66` all have bit 2 set
+  already, so the logo check passed while the header read back as
+  `07 04 06` instead of `03 04 02` (every byte off by exactly `0x04`).
+  The checksum catches that class of failure.
 - **Writes**: reading the same Transfer Pak address in bank 0 and bank 1
   (GB `0x0000` vs `0x4000`) must return different data.
 
@@ -100,6 +105,8 @@ header, which covers every byte of the file):
 |-----------|-----|------|-----------------|
 | Pokémon Gold | MBC3 | 1 MiB | `0x8A70` ✓ |
 | Super Mario Land 2 | MBC1 | 512 KiB | `0xA613` ✓ |
+| Super Mario Land | MBC1 | 64 KiB | `0x5ECF` ✓ |
+| Wario Land (Super Mario Land 3) | MBC1 | 512 KiB | `0xF4A5` ✓ |
 
 
 The ESP32-C6 port

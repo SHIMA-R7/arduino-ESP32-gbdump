@@ -71,9 +71,14 @@ static void wait_for_pak_insertion()
 // insertion:
 //
 //   Reads  -- the Nintendo logo at GB 0x0104 must come back as the fixed
-//             CE ED 66 66 pattern every real cartridge starts with.
-//             Header fields alone aren't enough; a flaky read returns
-//             plausible-looking garbage (we saw E0 C0 F0).
+//             CE ED 66 66 pattern every real cartridge starts with,
+//             *and* the header checksum at GB 0x014D has to match the
+//             header bytes. The logo alone is not enough: a marginal
+//             insertion here left data bit 2 stuck high, and CE ED 66 66
+//             all have bit 2 set already, so the logo check sailed
+//             through while the header read back as 07 04 06 instead of
+//             03 04 02 (every byte differing by exactly 0x04). The
+//             checksum catches that.
 //   Writes -- reading the same Transfer Pak address in bank 0 and bank 1
 //             (GB 0x0000 vs 0x4000) must differ. When writes are dropped
 //             the bank register never moves, so every "switched" bank
@@ -90,6 +95,33 @@ static bool verify_cart_access(cart_helper *cart)
 		N64_mem_managed[6] == 0x66 && N64_mem_managed[7] == 0x66))
 	{
 		Serial.println("Nintendo logo did not read back correctly.");
+		return false;
+	}
+
+	// Header checksum over GB 0x0134-0x014C, compared against the value
+	// stored at GB 0x014D. Those bytes span the 0xC120 block (0x0134
+	// onwards) and the 0xC140 block.
+	uint8_t header[25]; // GB 0x0134-0x014C
+	clear_mem_dump();
+	cart->my_tpak.read(0xC120); // GB 0x0120-0x013F
+	manage_mem_dump();
+	memcpy(header, &N64_mem_managed[20], 12); // GB 0x0134-0x013F
+	clear_mem_dump();
+	cart->my_tpak.read(0xC140); // GB 0x0140-0x015F
+	manage_mem_dump();
+	memcpy(header + 12, N64_mem_managed, 13); // GB 0x0140-0x014C
+	uint8_t sum = 0;
+	for (uint8_t i = 0; i < 25; ++i)
+	{
+		sum = sum - header[i] - 1;
+	}
+	if (sum != N64_mem_managed[13]) // GB 0x014D
+	{
+		Serial.print("Header checksum mismatch (computed 0x");
+		Serial.print(sum, HEX);
+		Serial.print(", stored 0x");
+		Serial.print(N64_mem_managed[13], HEX);
+		Serial.println(") -- bad read.");
 		return false;
 	}
 
