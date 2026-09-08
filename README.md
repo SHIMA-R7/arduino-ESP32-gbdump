@@ -1,6 +1,11 @@
 arduinogbdump
 =============
 
+> **This is a fork.** It adds the Transfer Pak unlock step the original was
+> missing (without it every pak read returns zeros), working Arduino Uno
+> support, MBC3 ROM dumping, and an ESP32-C6 port of the Joybus layer.
+> See [FORK.md](FORK.md) for what changed and why.
+
 This is a project that can **create GB/GBC ROMs from real cartridges**, as
 well as **copy save data to/from real cartridges.**
 

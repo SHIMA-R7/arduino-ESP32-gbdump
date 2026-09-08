@@ -13,9 +13,14 @@ void cart_helper::dump_rom()
 		case mbc1_ram:
 			mbc1_dump_rom();
 			break;
-		
-		
-		
+
+		case mbc3:
+		case mbc3_timer:
+		case mbc3_timer_ram:
+		case mbc3_ram:
+			mbc3_dump_rom();
+			break;
+
 		case mbc5:
 		case mbc5_ram:
 			mbc5_dump_rom();
@@ -88,6 +93,41 @@ void cart_helper::mbc1_dump_rom()
 		}
 	}
 	
+}
+
+// Dump a ROM from a cartridge with an MBC3. Same bank-switching layout as
+// MBC1 (fixed bank 0 at GB 0x0000-0x3fff, switchable bank at
+// 0x4000-0x7fff), but MBC3 uses a single 7-bit ROM bank register at GB
+// address 0x2000-0x3fff (write value 0 is NOT remapped to 1 like MBC1
+// does, but bank 0 is never requested here since the loop starts at 1).
+void cart_helper::mbc3_dump_rom()
+{
+	// Work with GB addresses 0x0000-0x3fff
+	my_tpak.set_bank(0x00);
+
+	for ( long j=0xc000; j<0x10000; j+=0x20 )
+	{
+		clear_mem_dump();
+		my_tpak.read(j);
+		manage_mem_dump();
+		write_mem_managed();
+	}
+
+	// Dump the rest of the ROM
+	for ( int i=1; i<rom_size; ++i )
+	{
+		write_byte_with_gb_addr( 0x2000, (uint8_t)i );
+
+		my_tpak.set_bank(0x01);
+
+		for ( long j=0xc000; j<0x10000; j+=0x20 )
+		{
+			clear_mem_dump();
+			my_tpak.read(j);
+			manage_mem_dump();
+			write_mem_managed();
+		}
+	}
 }
 
 // Dump a ROM from a cartridge that has an MBC5

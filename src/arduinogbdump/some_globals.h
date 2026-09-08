@@ -15,7 +15,12 @@ extern unsigned char N64_mem_managed[N64_byte_size];
 
 
 // Buffer for Serial.readBytesUntil()
-static const int bufsize = 1072;
+// Reduced from 1072 -- the original size doesn't fit in the Uno's 2KB of
+// RAM (100% used, build fails with "data section exceeds available
+// space"). This only affects sm_gb_write_var_num_bytes (bulk RAM
+// restore); reads (cart detection / ROM dump), which is all we need for
+// this diagnostic, are unaffected.
+static const int bufsize = 300;
 extern char buf[bufsize];
 
 
