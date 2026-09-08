@@ -1,13 +1,17 @@
 Fork notes
 ==========
 
-This fork adds three things to fl4shk's original arduinogbdump:
+This fork adds four things to fl4shk's original arduinogbdump:
 
 1. **The missing Transfer Pak unlock step**, without which every read and
    write to the pak silently returns zeros.
 2. **Arduino Uno support** (the original README lists it as "planned").
 3. **An ESP32-C6 port** of the Joybus layer, using the RMT peripheral
    instead of cycle-counted AVR assembly.
+4. **`src/n64_keyboard/`**, which points the same Joybus layer the other
+   way: stream the controller's buttons and stick to the host and turn
+   them into keystrokes, so you can play the ROMs you just dumped with
+   the controller you dumped them through.
 
 Everything below was worked out on real hardware: an Arduino Uno, an N64
 controller, two different Transfer Paks, and four cartridges (Super Mario
