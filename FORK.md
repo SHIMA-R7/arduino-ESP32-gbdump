@@ -150,10 +150,22 @@ some:
 - **Reset the RX channel after a receive timeout.** If no edge ever
   arrives the hardware reception stays pending forever, and every later
   `rmt_receive()` fails until you cycle `rmt_disable`/`rmt_enable`.
+- **Keep `mem_block_symbols` at 48.** That is one RMT memory block on the
+  C6; asking for 64 makes the driver reserve two, and then there is
+  nothing left for anything else that wants a channel. The DevKit's
+  addressable RGB LED is one such thing — `neopixelWrite()` drives it
+  through RMT — so lighting the LED made every single joybus transaction
+  fail with `no free tx channels`. Dropping to 48 lets them coexist.
 
-Status: the Joybus layer is verified against real hardware — the
-controller identify command returns a correct `0x05 0x00 0x01`, and
-transmitted command bytes were confirmed bit-for-bit against the wire
-(including the address CRC). The full cartridge dump path on the ESP32
-side has **not** been run end to end; the unlock and verification logic
-was added to match the Uno version after the Uno was the one hooked up.
+Wiring differs from the AVR build in one place: TX and RX get their own
+GPIOs (0 and 1 here), jumpered together externally to the controller's
+data line, with the same ~1k pull-up to 3.3V. On the C6 that pull-up is
+not about voltage levels — it is about edge rate, and the internal
+pull-up alone is far too weak for 1 µs pulses.
+
+Status: **verified end to end.** The ESP32-C6 build dumped Wario Land
+(512 KiB, MBC1) and the result is byte-identical to the Uno build's dump
+of the same cartridge (md5 `d9d95777…`), global checksum `0xF4A5`
+matching the header. The DevKit's RGB LED gives the same cue the Uno's
+plain LED does: blinking amber = reinsert the pak, green = good
+insertion, red = that one failed.

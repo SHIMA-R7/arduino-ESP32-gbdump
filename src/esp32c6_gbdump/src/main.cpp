@@ -10,6 +10,26 @@
 static const gpio_num_t JOYBUS_TX_PIN = GPIO_NUM_0;
 static const gpio_num_t JOYBUS_RX_PIN = GPIO_NUM_1;
 
+// The DevKit's onboard addressable RGB LED is the same cue the Uno build
+// uses its plain LED for: blinking amber = "reinsert the pak", solid
+// green = "good insertion, hands off", red = "that insertion failed".
+#ifdef RGB_BUILTIN
+static const int RGB_LED_PIN = RGB_BUILTIN;
+#else
+static const int RGB_LED_PIN = 8; // ESP32-C6-DevKitC-1 default
+#endif
+
+// neopixelWrite() drives the addressable LED through the RMT peripheral,
+// so it holds an RMT TX channel for as long as that pin stays
+// initialised -- and the C6 has few enough channels that joybus then
+// can't get one ("no free tx channels", every transaction failing). So
+// hand the channel straight back after each update.
+static void led(uint8_t r, uint8_t g, uint8_t b)
+{
+    neopixelWrite(RGB_LED_PIN, r, g, b);
+    rmtDeinit(RGB_LED_PIN);
+}
+
 static cart_helper g_cart;
 
 static void print_cart_info()
@@ -32,10 +52,14 @@ static void print_cart_info()
 // does not reproduce the transition.
 static bool wait_for_pak_insertion(uint32_t timeout_ms)
 {
-    Serial.println("Remove and reinsert the Transfer Pak now...");
+    Serial.println("Remove and reinsert the Transfer Pak now (LED blinking amber).");
     uint8_t last_status = 0xFF;
     uint32_t start = millis();
+    bool on = false;
     while (millis() - start < timeout_ms) {
+        on = !on;
+        led(on ? 40 : 0, on ? 20 : 0, 0); // amber blink
+
         uint8_t cmd = 0x00;
         uint8_t response[4] = {0};
         joybus::transact(&cmd, 1, response, 24);
@@ -45,6 +69,7 @@ static bool wait_for_pak_insertion(uint32_t timeout_ms)
             last_status = status;
         }
         if (status == 3) {
+            led(0, 0, 0);
             Serial.println("Got the fresh-insertion transition.");
             delay(300);
             return true;
@@ -73,9 +98,12 @@ void setup()
         }
         g_cart.init();
         if (g_cart.verify_access()) {
+            led(0, 60, 0); // solid green: ready
             break;
         }
+        led(60, 0, 0); // red: this insertion was no good
         Serial.println("Cartridge access check failed on this insertion -- try again.");
+        delay(500);
     }
 
     print_cart_info();

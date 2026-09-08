@@ -109,7 +109,10 @@ bool send_via_rmt(const uint8_t *cmd, size_t cmd_len, rmt_channel_handle_t *out_
     tx_cfg.gpio_num = s_tx_pin;
     tx_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
     tx_cfg.resolution_hz = RESOLUTION_HZ;
-    tx_cfg.mem_block_symbols = 64;
+    // 48 symbols is one RMT memory block on the C6. Asking for 64 makes
+    // the driver take two blocks, which starves anything else that wants
+    // a channel (the DevKit's addressable LED, for one).
+    tx_cfg.mem_block_symbols = 48;
     tx_cfg.trans_queue_depth = 1;
     tx_cfg.flags.io_od_mode = true; // open-drain: only actively drives low
 
@@ -199,7 +202,7 @@ void init(gpio_num_t tx_pin, gpio_num_t rx_pin)
     rx_cfg.gpio_num = s_rx_pin;
     rx_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
     rx_cfg.resolution_hz = RESOLUTION_HZ;
-    rx_cfg.mem_block_symbols = 64;
+    rx_cfg.mem_block_symbols = 48; // one memory block, see the TX config
     rx_cfg.flags.io_loop_back = false;
 
     if (rmt_new_rx_channel(&rx_cfg, &s_rx_chan) != ESP_OK) {
