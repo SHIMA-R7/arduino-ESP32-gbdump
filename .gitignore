@@ -1,2 +1,11 @@
 *.swp
 *.swo
+
+# PyInstaller output
+tools/build/
+tools/dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
