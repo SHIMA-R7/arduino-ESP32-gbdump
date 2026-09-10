@@ -61,3 +61,32 @@ Same flow and same validation, printed to the terminal. Exits non-zero if
 the global checksum doesn't match, so it can be scripted. `--no-reset`
 dumps again without redoing the insertion dance, which is useful for
 taking a second copy to compare against the first.
+
+
+`md2pdf.py` — report to PDF
+---------------------------
+
+    pip install markdown
+    python md2pdf.py ../REPORT.ja.md -o 開発レポート.pdf
+
+Renders Markdown to A4 through Edge's headless print-to-PDF. A browser
+rather than a PDF library because the report is Japanese: ReportLab's
+built-in fonts have no CJK glyphs at all, while Edge ships with Windows
+and already has the fonts and line-breaking rules. Each run uses a fresh
+profile, otherwise the call attaches to a running Edge and returns before
+printing anything.
+
+
+`print_pdf.py` — print a PDF without a PDF reader
+-------------------------------------------------
+
+    pip install pypdfium2
+    python print_pdf.py --list
+    python print_pdf.py 開発レポート.pdf --printer "Brother DCP-J1270N Printer"
+
+Windows has no scriptable path from a PDF to a printer on its own: the
+shell's `PrintTo` verb fails outright unless some installed application
+has registered for it, and Edge can only print *to* a PDF, not from one.
+So this renders each page with pypdfium2 and feeds the bitmaps to .NET's
+`PrintDocument`, which reaches any installed printer. `--dpi` (200 by
+default) trades file size for sharpness; `--pages 1-3` prints a range.

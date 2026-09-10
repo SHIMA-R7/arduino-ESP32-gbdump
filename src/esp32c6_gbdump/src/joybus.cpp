@@ -6,6 +6,7 @@
 
 #include "driver/rmt_tx.h"
 #include "driver/rmt_rx.h"
+#include "soc/soc_caps.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
@@ -79,45 +80,34 @@ bool IRAM_ATTR on_rx_done(rmt_channel_handle_t, const rmt_rx_done_event_data_t *
     return hp_task_woken == pdTRUE;
 }
 
-// Sends `cmd`/`cmd_len` (MSB first per byte) + a stop bit via a transient
-// RMT TX channel. Blocks until fully transmitted.
+// Brings up a TX channel without sending anything yet.
 //
-// On success, leaves the TX channel *enabled* (not yet disabled/deleted)
-// and returns its handle via `out_tx_chan` -- disabling/deleting it
-// generates a small electrical transient on the shared GPIO, so the
-// caller should defer that until after it's done reading any response
-// (see transact() below), not do it here.
-//
-// IMPORTANT: `eot_level` must be set to 1 (released/high) -- otherwise,
-// once left enabled after the transmission finishes, the channel defaults
-// to holding the line actively LOW, which looks exactly like a real
-// (bogus) low pulse to anything reading the pin afterwards.
-bool send_via_rmt(const uint8_t *cmd, size_t cmd_len, rmt_channel_handle_t *out_tx_chan)
+// This is deliberately separate from the transmit: creating and enabling
+// the channel drives the line low for a moment, and if that happens while
+// the RX channel is already armed it lands in the capture as a leading
+// symbol tens of microseconds long. Sometimes it stands alone, sometimes
+// it merges with the first command bit's low phase and swallows it, and
+// each case shifts the decode a different way -- 0x82 0x80 0x00 one poll,
+// 0x0A 0x00 0x03 the next, where the answer is 0x05 0x00 0x01. Opening
+// the channel *before* arming RX keeps the transient out of the capture
+// entirely.
+bool open_tx_channel(rmt_channel_handle_t *out_tx_chan)
 {
     *out_tx_chan = nullptr;
-    std::vector<rmt_symbol_word_t> tx_symbols;
-    tx_symbols.reserve(cmd_len * 8 + 1);
-    for (size_t i = 0; i < cmd_len; ++i) {
-        uint8_t byte = cmd[i];
-        for (int bit = 7; bit >= 0; --bit) {
-            tx_symbols.push_back(bit_symbol((byte >> bit) & 0x1));
-        }
-    }
-    tx_symbols.push_back(bit_symbol(true)); // stop bit
 
     rmt_tx_channel_config_t tx_cfg = {};
     tx_cfg.gpio_num = s_tx_pin;
     tx_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
     tx_cfg.resolution_hz = RESOLUTION_HZ;
-    // 48 symbols is one RMT memory block on the C6. Asking for 64 makes
-    // the driver take two blocks, which starves anything else that wants
-    // a channel (the DevKit's addressable LED, for one).
-    tx_cfg.mem_block_symbols = 48;
+    // Exactly one RMT memory block, whatever that is on this chip (48
+    // symbols on the C6, 64 on the original ESP32). Asking for more than
+    // a block makes the driver reserve two, which starves anything else
+    // that wants a channel -- the DevKit's addressable LED, for one.
+    tx_cfg.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
     tx_cfg.trans_queue_depth = 1;
     tx_cfg.flags.io_od_mode = true; // open-drain: only actively drives low
 
     rmt_channel_handle_t tx_chan = nullptr;
-    bool ok = true;
     if (rmt_new_tx_channel(&tx_cfg, &tx_chan) != ESP_OK) {
         ESP_LOGE(TAG, "rmt_new_tx_channel failed");
         s_last_status = "rmt_new_tx_channel failed";
@@ -130,41 +120,55 @@ bool send_via_rmt(const uint8_t *cmd, size_t cmd_len, rmt_channel_handle_t *out_
         return false;
     }
 
+    *out_tx_chan = tx_chan; // caller transmits, then tears this down
+    return true;
+}
+
+// Sends `cmd`/`cmd_len` (MSB first per byte) plus a stop bit down an
+// already-open channel, and waits for it to go out.
+//
+// `eot_level` must be 1 (released/high): the default of 0 leaves the line
+// actively driven LOW once the transmission finishes, which is
+// indistinguishable from a real low pulse to anything reading the pin.
+bool transmit_via_rmt(rmt_channel_handle_t tx_chan, const uint8_t *cmd,
+                       size_t cmd_len)
+{
+    std::vector<rmt_symbol_word_t> tx_symbols;
+    tx_symbols.reserve(cmd_len * 8 + 1);
+    for (size_t i = 0; i < cmd_len; ++i) {
+        uint8_t byte = cmd[i];
+        for (int bit = 7; bit >= 0; --bit) {
+            tx_symbols.push_back(bit_symbol((byte >> bit) & 0x1));
+        }
+    }
+    tx_symbols.push_back(bit_symbol(true)); // stop bit
+
     rmt_encoder_handle_t copy_encoder = nullptr;
     rmt_copy_encoder_config_t copy_cfg = {};
     if (rmt_new_copy_encoder(&copy_cfg, &copy_encoder) != ESP_OK) {
         ESP_LOGE(TAG, "rmt_new_copy_encoder failed");
         s_last_status = "rmt_new_copy_encoder failed";
+        return false;
+    }
+
+    bool ok = true;
+    rmt_transmit_config_t tx_transmit_cfg = {};
+    tx_transmit_cfg.loop_count = 0;
+    tx_transmit_cfg.flags.eot_level = 1;
+    if (rmt_transmit(tx_chan, copy_encoder, tx_symbols.data(),
+                      tx_symbols.size() * sizeof(rmt_symbol_word_t),
+                      &tx_transmit_cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "rmt_transmit failed");
+        s_last_status = "rmt_transmit failed";
+        ok = false;
+    } else if (rmt_tx_wait_all_done(tx_chan, 100) != ESP_OK) {
+        ESP_LOGE(TAG, "rmt_tx_wait_all_done timed out");
+        s_last_status = "rmt_tx_wait_all_done timed out";
         ok = false;
     }
 
-    if (ok) {
-        rmt_transmit_config_t tx_transmit_cfg = {};
-        tx_transmit_cfg.loop_count = 0;
-        tx_transmit_cfg.flags.eot_level = 1; // hold released/high, not low
-        if (rmt_transmit(tx_chan, copy_encoder, tx_symbols.data(),
-                          tx_symbols.size() * sizeof(rmt_symbol_word_t),
-                          &tx_transmit_cfg) != ESP_OK) {
-            ESP_LOGE(TAG, "rmt_transmit failed");
-            s_last_status = "rmt_transmit failed";
-            ok = false;
-        } else if (rmt_tx_wait_all_done(tx_chan, 100) != ESP_OK) {
-            ESP_LOGE(TAG, "rmt_tx_wait_all_done timed out");
-            s_last_status = "rmt_tx_wait_all_done timed out";
-            ok = false;
-        }
-    }
-
-    if (copy_encoder) {
-        rmt_del_encoder(copy_encoder);
-    }
-    if (!ok) {
-        rmt_disable(tx_chan);
-        rmt_del_channel(tx_chan);
-        return false;
-    }
-    *out_tx_chan = tx_chan; // caller tears this down later
-    return true;
+    rmt_del_encoder(copy_encoder);
+    return ok;
 }
 
 } // namespace
@@ -202,7 +206,7 @@ void init(gpio_num_t tx_pin, gpio_num_t rx_pin)
     rx_cfg.gpio_num = s_rx_pin;
     rx_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
     rx_cfg.resolution_hz = RESOLUTION_HZ;
-    rx_cfg.mem_block_symbols = 48; // one memory block, see the TX config
+    rx_cfg.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL; // see TX config
     rx_cfg.flags.io_loop_back = false;
 
     if (rmt_new_rx_channel(&rx_cfg, &s_rx_chan) != ESP_OK) {
@@ -222,11 +226,14 @@ void init(gpio_num_t tx_pin, gpio_num_t rx_pin)
         s_last_status = "rmt_enable(rx) failed (init)";
         return;
     }
+
     s_last_status = "init ok";
 }
 
-size_t transact(const uint8_t *cmd, size_t cmd_len, uint8_t *out_bytes, size_t out_bits,
-                 uint32_t timeout_us)
+// Runs one exchange. Returns the number of response bits decoded, or -1
+// if the capture came back out of step with what we transmitted.
+static int transact_once(const uint8_t *cmd, size_t cmd_len, uint8_t *out_bytes,
+                          size_t out_bits, uint32_t timeout_us)
 {
     if (s_tx_pin == GPIO_NUM_NC || s_rx_chan == nullptr || cmd_len == 0) {
         s_last_status = "not initialized";
@@ -243,9 +250,31 @@ size_t transact(const uint8_t *cmd, size_t cmd_len, uint8_t *out_bytes, size_t o
     size_t max_symbols = own_bits + out_bits + 16; // + margin for glitches
     std::vector<rmt_symbol_word_t> rx_symbols(max_symbols);
 
+    // Open the TX channel first, so its start-up transient happens
+    // before RX is listening (see open_tx_channel). Keeping one channel
+    // open across transactions instead was tried and stopped RX
+    // capturing anything at all on the original ESP32.
+    rmt_channel_handle_t tx_chan = nullptr;
+    if (!open_tx_channel(&tx_chan)) {
+        return 0;
+    }
+
     rmt_receive_config_t rx_receive_cfg = {};
     rx_receive_cfg.signal_range_min_ns = 200;
+    // End-of-frame threshold. A Joybus gap is at most ~3us, so 12us is
+    // plenty on paper and works on the C6 -- but on the original ESP32 it
+    // ends the reception instantly, before a single real symbol lands
+    // (the capture comes back as one empty symbol). Whatever the reason
+    // -- the value looks like it lands in the register in APB ticks
+    // rather than channel ticks there, which would make 12us behave like
+    // 150ns -- a much larger value is needed on that chip. The cost of
+    // the larger number is a longer wait after each response before the
+    // done event fires.
+#ifdef CONFIG_IDF_TARGET_ESP32
+    rx_receive_cfg.signal_range_max_ns = 500000;
+#else
     rx_receive_cfg.signal_range_max_ns = 12000;
+#endif
     bool rx_armed = rmt_receive(s_rx_chan, rx_symbols.data(), max_symbols * sizeof(rmt_symbol_word_t),
                                  &rx_receive_cfg) == ESP_OK;
     if (!rx_armed) {
@@ -253,9 +282,18 @@ size_t transact(const uint8_t *cmd, size_t cmd_len, uint8_t *out_bytes, size_t o
         s_last_status = "rmt_receive() arm failed";
     }
 
-    rmt_channel_handle_t tx_chan = nullptr;
-    if (!send_via_rmt(cmd, cmd_len, &tx_chan)) {
-        return 0;
+    // Let the receiver settle before putting anything on the wire.
+    // Transmitting immediately after rmt_receive() returns can beat the
+    // channel to it and lose the first bit -- the capture then holds one
+    // command bit fewer, every later bit sits one symbol early, and the
+    // reply decodes shifted (0x0A 0x00 0x03 where it should read
+    // 0x05 0x00 0x01).
+    esp_rom_delay_us(50);
+
+    if (!transmit_via_rmt(tx_chan, cmd, cmd_len)) {
+        rmt_disable(tx_chan);
+        rmt_del_channel(tx_chan);
+        return -1;
     }
 
     // Wait for the response while the TX channel is still around -- tear
@@ -265,10 +303,54 @@ size_t transact(const uint8_t *cmd, size_t cmd_len, uint8_t *out_bytes, size_t o
     if (rx_armed) {
         rmt_rx_done_event_data_t rx_data;
         if (xQueueReceive(s_rx_queue, &rx_data, pdMS_TO_TICKS(timeout_us / 1000 + 5)) == pdTRUE) {
-            static char status_buf[48];
-            snprintf(status_buf, sizeof(status_buf), "ok, %u raw symbols", (unsigned)rx_data.num_symbols);
+            static char status_buf[200];
+            int off = snprintf(status_buf, sizeof(status_buf),
+                                "ok, %u symbols, lows:", (unsigned)rx_data.num_symbols);
+            for (size_t i = 0; i < rx_data.num_symbols && i < 20 &&
+                 off < (int)sizeof(status_buf); ++i) {
+                const rmt_symbol_word_t &s = rx_data.received_symbols[i];
+                uint16_t low = (s.level0 == 0) ? s.duration0 : s.duration1;
+                off += snprintf(status_buf + off, sizeof(status_buf) - off,
+                                 " %u", (unsigned)low);
+            }
             s_last_status = status_buf;
-            for (size_t i = own_bits; i < rx_data.num_symbols && decoded_bits < out_bits; ++i) {
+
+            // Our own command and stop bit lead the capture (RX was
+            // armed first), so step past them to reach the response.
+            //
+            // Counting like this is only safe if the capture really did
+            // start at our first bit, so check it: decode the leading
+            // symbols and require them to be the command we just sent,
+            // stop bit included. A dropped or duplicated leading symbol
+            // shifts everything after it, and a shifted reply looks
+            // perfectly plausible rather than obviously broken -- better
+            // to report nothing than to hand back 0x0A 0x00 0x03 as if
+            // it were the answer.
+            size_t response_start = own_bits;
+            if (rx_data.num_symbols < own_bits) {
+                s_last_status = "capture too short to contain our own command";
+                rmt_disable(tx_chan);
+                rmt_del_channel(tx_chan);
+                return -1;
+            }
+            for (size_t i = 0; i < own_bits; ++i) {
+                const rmt_symbol_word_t &s = rx_data.received_symbols[i];
+                uint16_t low = (s.level0 == 0) ? s.duration0 : s.duration1;
+                bool got_one = low <= 2;
+                bool want_one = (i == own_bits - 1)
+                    ? true // stop bit
+                    : ((cmd[i / 8] >> (7 - i % 8)) & 1) != 0;
+                if (low < 1 || low > 6 || got_one != want_one) {
+                    s_last_status = "own command not echoed back intact -- "
+                                    "capture is out of step";
+                    rmt_disable(tx_chan);
+                    rmt_del_channel(tx_chan);
+                    return -1;
+                }
+            }
+
+            for (size_t i = response_start;
+                 i < rx_data.num_symbols && decoded_bits < out_bits; ++i) {
                 const rmt_symbol_word_t &sym = rx_data.received_symbols[i];
                 // RMT RX just records alternating segments starting from
                 // whatever level the line was at when armed -- it does
@@ -305,12 +387,91 @@ size_t transact(const uint8_t *cmd, size_t cmd_len, uint8_t *out_bytes, size_t o
     rmt_disable(tx_chan);
     rmt_del_channel(tx_chan);
 
-    return decoded_bits;
+    return (int)decoded_bits;
+}
+
+size_t transact(const uint8_t *cmd, size_t cmd_len, uint8_t *out_bytes,
+                 size_t out_bits, uint32_t timeout_us)
+{
+    // Captures intermittently start a bit late on the original ESP32 --
+    // roughly every other exchange there, never observed on the C6. The
+    // decoder catches it (the command we sent has to come back intact
+    // ahead of the response), so the cure is simply to run the exchange
+    // again rather than hand back a shifted reply.
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        int bits = transact_once(cmd, cmd_len, out_bytes, out_bits, timeout_us);
+        if (bits >= 0) {
+            return (size_t)bits;
+        }
+    }
+    return 0;
 }
 
 const char *last_status()
 {
     return s_last_status;
+}
+
+int tx_pulse_test(int samples)
+{
+    if (s_tx_pin == GPIO_NUM_NC || s_rx_pin == GPIO_NUM_NC) {
+        return -1;
+    }
+
+    // One long low pulse, slow enough to watch with digitalRead: 20 ms,
+    // which also stays inside RMT's 15-bit duration field at this 1 MHz
+    // resolution.
+    rmt_symbol_word_t slow;
+    slow.level0 = 0;
+    slow.duration0 = 20000;
+    slow.level1 = 1;
+    slow.duration1 = 1000;
+
+    rmt_tx_channel_config_t tx_cfg = {};
+    tx_cfg.gpio_num = s_tx_pin;
+    tx_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
+    tx_cfg.resolution_hz = RESOLUTION_HZ;
+    tx_cfg.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
+    tx_cfg.trans_queue_depth = 1;
+    tx_cfg.flags.io_od_mode = true;
+
+    rmt_channel_handle_t tx_chan = nullptr;
+    if (rmt_new_tx_channel(&tx_cfg, &tx_chan) != ESP_OK) {
+        return -1;
+    }
+    if (rmt_enable(tx_chan) != ESP_OK) {
+        rmt_del_channel(tx_chan);
+        return -1;
+    }
+
+    rmt_encoder_handle_t enc = nullptr;
+    rmt_copy_encoder_config_t enc_cfg = {};
+    if (rmt_new_copy_encoder(&enc_cfg, &enc) != ESP_OK) {
+        rmt_disable(tx_chan);
+        rmt_del_channel(tx_chan);
+        return -1;
+    }
+
+    rmt_transmit_config_t cfg = {};
+    cfg.loop_count = 0;
+    cfg.flags.eot_level = 1;
+
+    int lows = 0;
+    if (rmt_transmit(tx_chan, enc, &slow, sizeof(slow), &cfg) == ESP_OK) {
+        // Sample while it is still going out; rmt_transmit is async.
+        for (int i = 0; i < samples; ++i) {
+            if (gpio_get_level(s_rx_pin) == 0) {
+                ++lows;
+            }
+            esp_rom_delay_us(50);
+        }
+        rmt_tx_wait_all_done(tx_chan, 200);
+    }
+
+    rmt_del_encoder(enc);
+    rmt_disable(tx_chan);
+    rmt_del_channel(tx_chan);
+    return lows;
 }
 
 int sample_idle_high_count(int samples)

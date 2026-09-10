@@ -56,6 +56,14 @@ size_t transact(const uint8_t *cmd, size_t cmd_len, uint8_t *out_bytes, size_t o
 // Human-readable status of the most recent transact() call.
 const char *last_status();
 
+// Bring-up check that the RMT TX path actually drives the bus. Sends one
+// deliberately slow pulse (milliseconds, not microseconds) while polling
+// the RX pin with plain digitalRead, and reports how many samples came
+// back low. A working link reads low for most of the pulse; zero lows
+// means TX isn't reaching the wire even though a DC-level jumper test
+// might pass.
+int tx_pulse_test(int samples = 400);
+
 // Samples the raw RX-pin line level `samples` times back-to-back and
 // returns how many of those samples read HIGH. Useful to sanity-check
 // idle level / wiring without going through the joybus protocol at all.
